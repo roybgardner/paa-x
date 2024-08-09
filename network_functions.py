@@ -5,6 +5,9 @@ import math
 import matplotlib.pyplot as plt
 from matplotlib.gridspec import GridSpec
 
+from matplotlib_venn import venn2, venn2_circles
+from matplotlib_venn import venn3, venn3_circles
+
 
 import json
 import csv
@@ -18,6 +21,152 @@ twenty_distinct_colors = ['#e6194b', '#3cb44b', '#ffe119', '#4363d8', '#f58231',
                           '#f032e6', '#bcf60c', '#fabebe', '#008080', '#e6beff', '#9a6324', '#fffac8',\
                           '#800000', '#aaffc3', '#808000', '#ffd8b1', '#000075', '#808080', '#ffffff',\
                           '#000000']
+
+def load_mediation_data(mediating_actors_file,events_actors_file,events_file,locations_file,pax_actor_dict,\
+                        mediation_path):
+    # Stash mediation data in a dictionary
+    data_dict = {}
+    
+    with open(mediation_path + mediating_actors_file, encoding='utf-8', errors='replace') as f:
+        reader = csv.reader(f)
+        actors_header = next(reader)
+        actors_data = [row for row in reader]
+        f.close()
+
+    with open(mediation_path + events_actors_file, encoding='utf-8', errors='replace') as f:
+        reader = csv.reader(f)
+        events_actors_header = next(reader)
+        events_actors_data = [row for row in reader]
+        f.close()
+
+    with open(mediation_path + events_file, encoding='utf-8', errors='replace') as f:
+        reader = csv.reader(f)
+        events_header = next(reader)
+        events_data = [row for row in reader]
+        f.close()
+
+    with open(mediation_path + locations_file, encoding='utf-8', errors='replace') as f:
+        reader = csv.reader(f)
+        locations_header = next(reader)
+        locations_data = [row for row in reader]
+        f.close()
+    
+    # Collect all actors from the actor data that map onto PA-X actors
+    # There is duplication and incomplete duplicates in these data
+    actor_ids = []
+    actors_dict = {}
+    for row in actors_data:
+        pax_id = row[actors_header.index('third_party_id')].strip()
+        if len(pax_id) == 0:
+            continue
+        # Get the <prefix>_<pax_id> for of actor identifier we are using in agreement space
+        agreement_space_id = pax_actor_dict[pax_id]
+        actor_ids.append(agreement_space_id)
+        
+        if not agreement_space_id in actors_dict:
+            actors_dict[agreement_space_id] = {}
+            actors_dict[agreement_space_id]['pax_id'] = pax_id
+            actors_dict[agreement_space_id]['glopad_id'] =\
+                    row[actors_header.index('third_party_id_GLOPAD')].strip()
+            actors_dict[agreement_space_id]['glopad_name'] =\
+                    row[actors_header.index('third_party')].strip()
+       
+    actor_ids = sorted(list(set(actor_ids)))
+    
+    assert(actor_ids==sorted(list(actors_dict.keys())))
+
+    # Collect event data
+    event_ids = []
+    events_dict = {}
+    for row in events_data:
+        event_id = row[events_header.index('med_event_ID')].strip()
+        event_ids.append(event_id)
+        if not event_id in events_dict:
+            events_dict[event_id] = {}
+            day = row[events_header.index('Day')].strip()
+            if len(day) == 0:
+                day = '01'
+            if len(day) == 1:
+                day = '0' + day
+            month = row[events_header.index('Month')].strip()
+            if len(month) == 0:
+                month = '01'
+            if len(month) == 1:
+                month = '0' + month
+            year = row[events_header.index('Year')].strip()
+            date = int(year + month + day)
+            events_dict[event_id]['date'] = date
+            events_dict[event_id]['type'] = row[events_header.index('med_type')].strip()
+    
+    event_ids = sorted(list(set(event_ids)))
+    
+    assert(event_ids==sorted(list(events_dict.keys())))
+    
+    # Build the event-actor biadjacency matrix - the core data structure
+    # Only want actors that map onto PA-X actors at this point so build a
+    # lookup table
+    glopad_lookup = {v['glopad_id']:k for k,v in actors_dict.items()}
+    matrix = np.zeros((len(events_dict),len(actors_dict))).astype(np.int_)
+    for row in events_actors_data:
+        
+        event_id = row[events_actors_header.index('med_event_ID')].strip()
+        event_index = event_ids.index(event_id)
+        
+        glopad_actor_id = row[events_actors_header.index('third_party_id_GLOPAD')].strip()
+        if not glopad_actor_id in glopad_lookup:
+            continue
+        actor_id = glopad_lookup[glopad_actor_id]
+        actor_index = actor_ids.index(actor_id)
+        
+        #edge_dict = populate_edge_dict(row,signatories_header)
+        matrix[event_index,actor_index] = 1
+    matrix = np.array(matrix)
+    
+
+    data_dict['actors_header'] = actors_header
+    data_dict['events_actors_header'] = events_actors_header
+    data_dict['events_header'] = events_header
+    data_dict['actor_ids'] = sorted(actor_ids)
+    data_dict['actors_dict'] = actors_dict
+    data_dict['event_ids'] = event_ids
+    data_dict['events_dict'] = events_dict
+    data_dict['matrix'] = matrix
+
+    return data_dict
+
+def visualise_superimposition(base_matrix,logical_matrix,super_set,data_dict,super_color,title):
+    f = plt.figure(figsize=(16,16))
+    graph = nx.from_numpy_array(base_matrix,create_using=nx.Graph)
+
+    # Get edge colors
+    rc = np.nonzero(logical_matrix) # Row and column indices of non-zero pairs in bitwise matrix
+    zc = list(zip(list(rc[0]),list(rc[1])))
+    edge_colors = []
+    for edge in graph.edges:
+        if edge in zc:
+            edge_colors.append(super_color)
+        else:
+            edge_colors.append('lightgray')
+
+    node_labels = {i:name for i,name in enumerate(super_set)}
+    isolates = list(nx.isolates(graph))
+    graph.remove_nodes_from(isolates)
+    for k in isolates:
+        node_labels.pop(k, None)
+    #node_colors = [data_dict['color_map'][v.split('_')[0]] for _,v in node_labels.items()]
+    node_colors = []
+    for _,v in node_labels.items():
+        if v.split('_')[0] in data_dict['color_map']:
+            node_colors.append(data_dict['color_map'][v.split('_')[0]])
+        else:
+            node_colors.append('gray')
+
+    pos = nx.spring_layout(graph)
+    nx.draw_networkx(graph,pos,labels=node_labels,node_color=node_colors,alpha=0.6)
+    nx.draw_networkx_edges(graph,pos,edge_color=edge_colors)
+    plt.title(title,fontsize='x-large')
+    plt.show()
+
 
 def depth_first_search(matrix,query_index,max_depth=1,depth=1,vertices=[],visited=[]):
     """
@@ -204,29 +353,38 @@ def get_peace_process_data(process_name,data_dict):
     # Get all agreements for a peace process
     agreement_ids = [agreement_id for agreement_id,agreement_data in data_dict['agreements_dict'].items()\
                         if agreement_data['pp_name'].strip()==process_name]
-    print(len(agreement_ids))
     agreement_indices = [data_dict['agreement_ids'].index(agreement_id) for\
                             agreement_id in agreement_ids]
     
+    
     sub_matrix = data_dict['matrix'][np.ix_\
                             (agreement_indices,range(0,data_dict['matrix'].shape[1]))]
-    actor_indices = list(set([i for row in sub_matrix for i,v in enumerate(row) if v > 0]))
+    
+    actor_indices = sorted(list(set([i for row in sub_matrix for i,v in enumerate(row) if v > 0])))
     actor_ids = [data_dict['actor_ids'][index] for index in actor_indices]
+    print(actor_ids)
     
     matrix = sub_matrix[np.ix_(range(0,len(agreement_indices)),actor_indices)]
-    matrix = np.array(matrix)
+
+    ucdp_con_ids = [agreement_data['ucdp_con_id'] for _,agreement_data in data_dict['agreements_dict'].items()\
+                        if agreement_data['pp_name'].strip()==process_name]
+    ucdp_con_ids = list(set(ucdp_con_ids))
+    
+    
     pp_data_dict = {}
     pp_data_dict['name'] = process_name
-    pp_data_dict['actor_ids'] = actor_ids
+    pp_data_dict['ucdp_con_id'] = ucdp_con_ids[0]
+    pp_data_dict['actor_ids'] = sorted(actor_ids)
     pp_data_dict['agreement_ids'] = agreement_ids
     pp_data_dict['matrix'] = matrix    
     return pp_data_dict
 
 def get_cooccurrence_matrices(matrix):
-    # Actor-actor co-occurence matrix for a peace process
-    V = np.matmul(matrix.T,matrix)
-    # Agreement-agreement co-occurence matrix
-    W = np.matmul(matrix,matrix.T)
+    bin_matrix = (matrix > 1).astype(np.int8)
+    # Columns-columns co-occurence matrix
+    V = np.matmul(bin_matrix.T,bin_matrix)
+    # Rows-rows co-occurence matrix
+    W = np.matmul(bin_matrix,bin_matrix.T)
     return (V,W)
 
 def load_agreement_actor_data(actors_file,signatories_file,agreements_file,countries_file,data_path):
@@ -315,7 +473,7 @@ def load_agreement_actor_data(actors_file,signatories_file,agreements_file,count
             continue
         agreement_id = 'AGT_' + agreement_id
         countries_dict[agreement_id] = {}
-        countries_dict[agreement_id]['country'] = row[countries_header.index('Country_entity')].strip()
+        countries_dict[agreement_id]['name'] = row[countries_header.index('Country_entity')].strip()
         countries_dict[agreement_id]['region'] = row[countries_header.index('Region')].strip()
         countries_dict[agreement_id]['iso'] = row[countries_header.index('ISO code')].strip()
         countries_dict[agreement_id]['gwno'] = row[countries_header.index('GWNO')].strip()
@@ -334,7 +492,13 @@ def load_agreement_actor_data(actors_file,signatories_file,agreements_file,count
         actors_dict[actor_id]['type'] = row[actors_header.index('type')].strip()
         actors_dict[actor_id]['type_name'] = row[actors_header.index('actor_type')].strip()
         actors_dict[actor_id]['un_type'] = row[actors_header.index('un_type')].strip()
-        actors_dict[actor_id]['ucdp_id'] = row[actors_header.index('ucdp_id')]
+        # Might be empty
+        ucdp_id = row[actors_header.index('ucdp_id')].strip()
+        if len(ucdp_id) == 0:
+            ucdp_id = -1
+        else:
+            ucdp_id = int(float(ucdp_id))
+        actors_dict[actor_id]['ucdp_id'] = ucdp_id
         actors_dict[actor_id]['ucdp_name'] = row[actors_header.index('ucdp_name')].strip()
         actors_dict[actor_id]['acled_name'] = row[actors_header.index('acled_name')].strip()
         
@@ -347,17 +511,26 @@ def load_agreement_actor_data(actors_file,signatories_file,agreements_file,count
         agreement_id = 'AGT_' + agreement_id
         agreements_dict[agreement_id] = {}
         agreements_dict[agreement_id]['type'] = 'AGT'
+        agreements_dict[agreement_id]['name'] = row[agreements_header.index('Agt')].strip()
         agreements_dict[agreement_id]['date'] = row[agreements_header.index('Dat')].strip()
         agreements_dict[agreement_id]['pp_id'] = row[agreements_header.index('PP')].strip()
         agreements_dict[agreement_id]['pp_name'] = row[agreements_header.index('PPName')].strip()
         agreements_dict[agreement_id]['stage'] = row[agreements_header.index('Stage')].strip()
         agreements_dict[agreement_id]['stage_sub'] = row[agreements_header.index('StageSub')].strip()
         agreements_dict[agreement_id]['stage_label'] = row[agreements_header.index('stage_label')].strip()
+        # Might be empty or float
+        ucdp_con_id = row[agreements_header.index('UcdpCon')].strip()
+        if len(ucdp_con_id) == 0:
+            ucdp_con_id = -1
+        else:
+            ucdp_con_id = int(float(ucdp_con_id))
+        agreements_dict[agreement_id]['ucdp_con_id'] = ucdp_con_id
+      
         date = row[agreements_header.index('Dat')].strip().split('-')
         dates_dict[agreement_id] = int(''.join(date))
     
     # Build the agreement-actor biadjacency matrix - the core data structure
-    matrix = np.zeros((len(agreements_dict),len(actors_dict)))
+    matrix = np.zeros((len(sig_agreement_ids),len(sig_actor_ids))).astype(np.int_)
     for row in signatories_data:
         agreement_id = row[signatories_header.index('AgtId')].strip()
         agreement_index = sig_agreement_ids.index(agreement_id)
@@ -379,9 +552,9 @@ def load_agreement_actor_data(actors_file,signatories_file,agreements_file,count
     color_map = {type_:twenty_distinct_colors[i] for\
                  i,type_ in enumerate(vertex_types)}
     
-    data_dict['actors_header'] = sig_actor_ids
-    data_dict['agreements_header'] = sig_agreement_ids
-    data_dict['countries_header'] = countries_dict
+    data_dict['actors_header'] = actors_header
+    data_dict['agreements_header'] = agreements_header
+    data_dict['countries_header'] = countries_header
     data_dict['actor_ids'] = sig_actor_ids
     data_dict['agreement_ids'] = ['AGT_' + agreement_id for agreement_id in sig_agreement_ids]
     data_dict['countries_dict'] = countries_dict
@@ -595,7 +768,7 @@ def get_actor_name(actor_id,data_dict):
     param data_dict: Global data dictionary
     return: Name of actor
     """
-    return data_dict['vertices_dict'][actor_id][data_dict['nodes_header'].index('node_name')]
+    return data_dict['actors_dict'][actor_id]['name']
 
 def get_agreement_name(agreement_id,data_dict):
     """
@@ -604,13 +777,13 @@ def get_agreement_name(agreement_id,data_dict):
     param data_dict: Global data dictionary
     return: Name of agreement
     """
-    return data_dict['vertices_dict'][agreement_id][data_dict['nodes_header'].index('node_name')]
+    return data_dict['agreements_dict'][agreement_id]['name']
 
 def get_agreement_date(agreement_id,data_dict):
     """
     Get the date of an agreement
     param agreement_id: agreement ID
     param data_dict: Global data dictionary
-    return: Name of agreement
+    return: Date of agreement
     """
-    return data_dict['vertices_dict'][agreement_id][data_dict['nodes_header'].index('date')]
+    return data_dict['dates_dict'][agreement_id]
